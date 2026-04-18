@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+import logging
+import logging.config
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import settings
+from app.db import init_db
+from app.routers import calls as calls_router
+from app.routers import carriers as carriers_router
+from app.routers import loads as loads_router
+from app.routers import metrics as metrics_router
+from app.routers import negotiation as negotiation_router
+
+
+def _configure_logging() -> None:
+    logging.config.dictConfig(
+        {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "json": {
+                    "format": '{"time":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","message":"%(message)s"}'
+                }
+            },
+            "handlers": {
+                "console": {
+                    "class": "logging.StreamHandler",
+                    "formatter": "json",
+                }
+            },
+            "root": {"level": settings.LOG_LEVEL, "handlers": ["console"]},
+        }
+    )
+
+
+_configure_logging()
+logger = logging.getLogger(__name__)
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="Carrier Sales API",
+        description="Backend API for the HappyRobot inbound carrier sales voice agent.",
+        version="0.1.0",
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins_list(),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.on_event("startup")
+    def on_startup() -> None:
+        init_db()
+        logger.info("Application startup complete")
+
+    @app.get("/health", tags=["ops"])
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    app.include_router(carriers_router.router)
+    app.include_router(loads_router.router)
+    app.include_router(negotiation_router.router)
+    app.include_router(calls_router.router)
+    app.include_router(metrics_router.router)
+    # app.include_router(negotiation_router.router)
+    # app.include_router(calls_router.router)
+    # app.include_router(metrics_router.router)
+
+    return app
+
+
+app = create_app()
