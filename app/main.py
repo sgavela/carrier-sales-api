@@ -7,7 +7,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.db import init_db
+from app.db import SessionLocal, init_db
+from app.models import Load
 from app.routers import calls as calls_router
 from app.routers import carriers as carriers_router
 from app.routers import loads as loads_router
@@ -58,6 +59,7 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def on_startup() -> None:
         init_db()
+        _auto_seed()
         logger.info("Application startup complete")
 
     @app.get("/health", tags=["ops"])
@@ -69,11 +71,21 @@ def create_app() -> FastAPI:
     app.include_router(negotiation_router.router)
     app.include_router(calls_router.router)
     app.include_router(metrics_router.router)
-    # app.include_router(negotiation_router.router)
-    # app.include_router(calls_router.router)
-    # app.include_router(metrics_router.router)
 
     return app
+
+
+def _auto_seed() -> None:
+    """Seed loads on first boot (empty table). Safe to call on every startup."""
+    from scripts.seed_db import seed_loads  # local import avoids circular deps at module level
+
+    with SessionLocal() as db:
+        if db.query(Load).first() is not None:
+            return
+    with SessionLocal() as db:
+        created, _ = seed_loads(db)
+        if created:
+            logger.info("Auto-seeded %d loads", created)
 
 
 app = create_app()
