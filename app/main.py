@@ -78,16 +78,25 @@ def create_app() -> FastAPI:
 
 
 def _auto_seed() -> None:
-    """Seed loads on first boot (empty table). Safe to call on every startup."""
-    from scripts.seed_db import seed_loads  # local import avoids circular deps at module level
+    """Seed loads and call_logs on first boot (empty tables). Safe to call on every startup."""
+    from scripts.seed_db import seed_loads
+    from scripts.seed_call_logs import seed_call_logs
+    from app.models import CallLog
 
     with SessionLocal() as db:
-        if db.query(Load).first() is not None:
-            return
-    with SessionLocal() as db:
-        created, _ = seed_loads(db)
-        if created:
-            logger.info("Auto-seeded %d loads", created)
+        loads_exist = db.query(Load).first() is not None
+        calls_exist = db.query(CallLog).first() is not None
+
+    if not loads_exist:
+        with SessionLocal() as db:
+            created, _ = seed_loads(db)
+            if created:
+                logger.info("Auto-seeded %d loads", created)
+
+    if not calls_exist:
+        logger.info("call_logs empty — seeding call logs...")
+        seed_call_logs()
+        logger.info("Auto-seeded call logs")
 
 
 app = create_app()
