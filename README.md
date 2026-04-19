@@ -951,13 +951,9 @@ Both support Docker deploys. Railway is fastest to configure; Fly.io gives more 
 
 ## FMCSA web key
 
-The FMCSA QC API is a free US government service. To get a web key:
+Set `FMCSA_MOCK=true` — for a realistic, deterministic responses with no network calls and is what CI uses.
 
-1. Submit a request at https://ask.fmcsa.dot.gov/app/ask (select "QC API access").
-2. Approval typically takes 1–2 business days.
-3. Add the key: `FMCSA_WEBKEY=your-key-here` and set `FMCSA_MOCK=false`.
-
-While waiting (or if the API is geo-restricted in your environment), set `FMCSA_MOCK=true` — the mock returns realistic, deterministic responses with no network calls and is what CI uses.
+Set `FMCSA_MOCK=false` for real API calls to FMCSA, although be aware they are restricted from outside the US. So it works in Render because the server is in North Viriginia, but not in local environment unless you are in the US or have a VPN.
 
 ---
 
