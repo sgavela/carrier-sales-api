@@ -1,9 +1,10 @@
 from datetime import datetime
 
-from app.models import CallLog, CallOutcome, CallSentiment, EquipmentType, Load, LoadStatus
+from app.models import CallLog, CallSentiment, EquipmentType, Load, LoadStatus
 from tests.conftest import AUTH_HEADERS
 
 LOG_URL = "/calls/log"
+LOG_CALL_URL = "/calls/log-call"
 METRICS_URL = "/metrics"
 CALLS_URL = "/calls"
 
@@ -199,3 +200,133 @@ def test_list_calls_pagination(client, db):
 
     res2 = client.get(f"{CALLS_URL}?limit=2&offset=2", headers=AUTH_HEADERS)
     assert len(res2.json()) == 2
+
+
+# ── POST /calls/log-call (HappyRobot nested payload) ─────────────────────────
+
+def hr_payload(**overrides) -> dict:
+    """Build a minimal valid LogCallRequest payload."""
+    p = {
+        "call_id": "hr_test0001",
+        "started_at": "2026-04-19T15:00:00",
+        "ended_at": "2026-04-19T15:04:00",
+        "carrier": {
+            "mc_number": "MC-123456",
+            "carrier_name": "SWIFT LOGISTICS LLC",
+            "dot_number": "DOT-2001001",
+            "eligible": True,
+        },
+        "load": {
+            "load_id": "LD-00001",
+            "origin": "Chicago, IL",
+            "destination": "Atlanta, GA",
+            "equipment_type": "Dry Van",
+            "loadboard_rate": 1500.0,
+            "miles": 716,
+            "commodity_type": "Electronics",
+            "pickup_datetime": "2026-04-25T08:00:00",
+        },
+        "negotiation": {
+            "initial_carrier_offer": 1650.0,
+            "final_rate": 1560.0,
+            "num_rounds": 1,
+            "rounds_detail": [
+                {"round": 1, "carrier_offer": 1650.0, "our_counter": 1500.0, "decision": "accept"}
+            ],
+            "walk_away_reason": None,
+        },
+        "classification": {
+            "outcome": "booked",
+            "sentiment": "positive",
+            "unresolved_topics": [],
+            "tool_errors": [],
+        },
+        "summary": {
+            "transcript_summary": "Booked after 1 round.",
+            "raw_extraction": {},
+        },
+    }
+    p.update(overrides)
+    return p
+
+
+def test_log_call_creates_new(client, db):
+    make_load(db)
+    res = client.post(LOG_CALL_URL, json=hr_payload(), headers=AUTH_HEADERS)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["call_id"] == "hr_test0001"
+    assert data["stored"] is True
+    assert data["action"] == "created"
+    assert db.query(CallLog).filter(CallLog.id == "hr_test0001").count() == 1
+
+
+def test_log_call_idempotent(client, db):
+    make_load(db)
+    client.post(LOG_CALL_URL, json=hr_payload(), headers=AUTH_HEADERS)
+    # Second call with same call_id but different sentiment
+    payload2 = hr_payload()
+    payload2["classification"]["sentiment"] = "neutral"
+    res = client.post(LOG_CALL_URL, json=payload2, headers=AUTH_HEADERS)
+    assert res.status_code == 200
+    assert res.json()["action"] == "updated"
+    # Only one row in DB
+    assert db.query(CallLog).filter(CallLog.id == "hr_test0001").count() == 1
+    record = db.get(CallLog, "hr_test0001")
+    db.refresh(record)
+    assert record.sentiment.value == "neutral"
+
+
+def test_log_call_booked_updates_load(client, db):
+    make_load(db)
+    res = client.post(LOG_CALL_URL, json=hr_payload(), headers=AUTH_HEADERS)
+    assert res.json()["load_status_changed"] is True
+
+    load = db.get(Load, "LD-00001")
+    db.refresh(load)
+    assert load.status == LoadStatus.booked
+    assert load.booked_rate == 1560.0
+    assert load.booked_mc == "123456"  # normalized from "MC-123456"
+
+
+def test_log_call_booked_on_already_booked_load_warns(client, db):
+    make_load(db)
+    # First booking
+    client.post(LOG_CALL_URL, json=hr_payload(), headers=AUTH_HEADERS)
+    # Second booking attempt on same load with different call_id
+    payload2 = hr_payload()
+    payload2["call_id"] = "hr_test0002"
+    res = client.post(LOG_CALL_URL, json=payload2, headers=AUTH_HEADERS)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["load_status_changed"] is False
+    assert data["warning"] is not None
+    assert "already booked" in data["warning"]
+
+
+def test_log_call_invalid_booked_without_final_rate(client, db):
+    make_load(db)
+    payload = hr_payload()
+    payload["negotiation"]["final_rate"] = None
+    res = client.post(LOG_CALL_URL, json=payload, headers=AUTH_HEADERS)
+    assert res.status_code == 400
+    assert "final_rate" in res.json()["detail"]
+
+
+def test_log_call_num_rounds_mismatch(client, db):
+    payload = hr_payload()
+    payload["classification"]["outcome"] = "no_agreement"
+    payload["negotiation"]["final_rate"] = None
+    payload["negotiation"]["num_rounds"] = 3          # says 3 rounds
+    payload["negotiation"]["rounds_detail"] = [       # but only 1 entry
+        {"round": 1, "carrier_offer": 1650.0, "our_counter": 1500.0, "decision": "counter"}
+    ]
+    payload["load"]["load_id"] = "LD-00001"
+    res = client.post(LOG_CALL_URL, json=payload, headers=AUTH_HEADERS)
+    assert res.status_code == 400
+    assert "num_rounds" in res.json()["detail"]
+
+
+def test_log_call_requires_api_key(client):
+    res = client.post(LOG_CALL_URL, json=hr_payload())
+    assert res.status_code == 401

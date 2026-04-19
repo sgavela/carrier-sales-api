@@ -296,4 +296,134 @@ Both support Docker deploys with similar steps. Fly.io offers the most control; 
 - **Rate limiting**: add `slowapi` middleware to protect against abuse.
 - **Observability**: instrument with OpenTelemetry for traces and metrics in production.
 - **Auth upgrade**: add JWT or OAuth2 for multi-tenant / multi-agent support.
-- **Dashboard frontend**: consume `GET /metrics` and `GET /calls` from a React/Next.js app.
+- **Dashboard frontend**: consume `GET /dashboard` from a React/Next.js app.
+
+---
+
+## API examples
+
+### POST /calls/log-call — Record a completed call (HappyRobot payload)
+
+```bash
+curl -s -X POST http://localhost:8000/calls/log-call \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "call_id": "hr_a1b2c3d4",
+    "started_at": "2026-04-19T15:00:00",
+    "ended_at": "2026-04-19T15:04:05",
+    "carrier": {
+      "mc_number": "MC-123456",
+      "carrier_name": "SWIFT LOGISTICS LLC",
+      "dot_number": "DOT-2001001",
+      "eligible": true
+    },
+    "load": {
+      "load_id": "LD-00001",
+      "origin": "Chicago, IL",
+      "destination": "Atlanta, GA",
+      "equipment_type": "Dry Van",
+      "loadboard_rate": 1500.0,
+      "miles": 716,
+      "commodity_type": "Electronics",
+      "pickup_datetime": "2026-04-25T08:00:00"
+    },
+    "negotiation": {
+      "initial_carrier_offer": 1650.0,
+      "final_rate": 1560.0,
+      "num_rounds": 1,
+      "rounds_detail": [
+        {"round": 1, "carrier_offer": 1650.0, "our_counter": 1500.0, "decision": "accept"}
+      ],
+      "walk_away_reason": null
+    },
+    "classification": {
+      "outcome": "booked",
+      "sentiment": "positive",
+      "unresolved_topics": [],
+      "tool_errors": []
+    },
+    "summary": {
+      "transcript_summary": "Carrier verified. Pitched Chicago-Atlanta Dry Van at $1,500. Agreed at $1,560 after 1 round.",
+      "raw_extraction": {}
+    }
+  }'
+```
+
+**Response:**
+```json
+{
+  "call_id": "hr_a1b2c3d4",
+  "stored": true,
+  "action": "created",
+  "load_status_changed": true,
+  "warning": null
+}
+```
+
+The endpoint is **idempotent** — resending the same `call_id` updates the existing record instead of creating a duplicate (`"action": "updated"`).
+
+---
+
+### GET /dashboard — Real-time KPI dashboard
+
+```bash
+# Last 30 days, all equipment types (defaults)
+curl -s "http://localhost:8000/dashboard" \
+  -H "X-API-Key: $API_KEY" | jq .overview
+
+# Custom date range + equipment filter
+curl -s "http://localhost:8000/dashboard?from=2026-03-01&to=2026-04-19&equipment_type=Reefer" \
+  -H "X-API-Key: $API_KEY"
+```
+
+**Response (truncated):**
+```json
+{
+  "generated_at": "2026-04-19T15:32:11",
+  "period_from": "2026-03-20",
+  "period_to": "2026-04-19",
+  "equipment_filter": null,
+  "overview": {
+    "total_calls": 150,
+    "booking_rate": 0.26,
+    "avg_margin_pct": 0.022,
+    "revenue_captured": 87432.50,
+    "avg_call_duration_seconds": 271.4,
+    "calls_by_day": [
+      {"date": "2026-03-20", "count": 3},
+      {"date": "2026-03-21", "count": 5}
+    ],
+    "outcome_breakdown": {
+      "booked": 39,
+      "no_agreement": 45,
+      "no_loads_found": 25,
+      "carrier_not_eligible": 20,
+      "carrier_declined": 15,
+      "other": 6
+    }
+  },
+  "carriers": {
+    "carriers": [
+      {"mc_number": "MC-100001", "carrier_name": "SWIFT LOGISTICS LLC",
+       "total_calls": 20, "booking_rate": 0.35, "tier": "B"}
+    ],
+    "dormant_carriers": [
+      {"mc_number": "MC-001234", "carrier_name": "HERITAGE HAULING LLC",
+       "last_call_at": "2026-03-23T14:22:00", "historical_bookings": 2, "days_dormant": 27}
+    ]
+  },
+  "pricing": {
+    "lost_near_miss": [
+      {"call_id": "hr_...", "gap_pct": 1.8, "revenue_lost_estimate": 1560.45}
+    ],
+    "walk_away_rate": 0.027
+  },
+  "quality": {
+    "tool_error_rate": 0.013,
+    "near_miss_count": 11,
+    "walk_away_count": 4
+  },
+  "recent_calls": [...]
+}
+```

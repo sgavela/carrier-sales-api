@@ -5,10 +5,9 @@ Negotiation tests split into two layers:
 """
 from datetime import datetime
 
-import pytest
 
 from app.models import EquipmentType, Load, LoadStatus
-from app.services.negotiator import NegotiationDecision, evaluate
+from app.services.negotiator import evaluate
 from tests.conftest import AUTH_HEADERS
 
 RATE = 2000.0   # loadboard rate used in all scenarios

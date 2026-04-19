@@ -11,6 +11,7 @@ from app.db import SessionLocal, init_db
 from app.models import Load
 from app.routers import calls as calls_router
 from app.routers import carriers as carriers_router
+from app.routers import dashboard as dashboard_router
 from app.routers import loads as loads_router
 from app.routers import metrics as metrics_router
 from app.routers import negotiation as negotiation_router
@@ -71,6 +72,7 @@ def create_app() -> FastAPI:
     app.include_router(negotiation_router.router)
     app.include_router(calls_router.router)
     app.include_router(metrics_router.router)
+    app.include_router(dashboard_router.router)
 
     return app
 

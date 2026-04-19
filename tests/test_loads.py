@@ -1,6 +1,5 @@
 from datetime import datetime
 
-import pytest
 
 from app.models import EquipmentType, Load, LoadStatus
 from tests.conftest import AUTH_HEADERS

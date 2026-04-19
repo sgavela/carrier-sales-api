@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 from typing import Optional
 
-from fastapi import Depends, HTTPException, Security, status
+from fastapi import HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 
 from app.config import settings

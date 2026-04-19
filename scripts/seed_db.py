@@ -1,4 +1,5 @@
-"""Populate the database with loads from data/loads_seed.json. Idempotent."""
+"""Populate the database with loads and call_logs. Idempotent."""
+import argparse
 import json
 import logging
 import sys
@@ -38,12 +39,23 @@ def seed_loads(db: Session) -> tuple[int, int]:
     return created, updated
 
 
-def seed() -> None:
+def seed(loads_only: bool = False) -> None:
     init_db()
     with SessionLocal() as db:
         created, updated = seed_loads(db)
-    logger.info("Seed complete — created: %d, updated: %d", created, updated)
+    logger.info("Loads seed complete — created: %d, updated: %d", created, updated)
+
+    if not loads_only:
+        from scripts.seed_call_logs import seed_call_logs
+        seed_call_logs()
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Seed database with loads and call_logs.")
+    p.add_argument("--loads-only", action="store_true", help="Skip call_logs seed")
+    return p.parse_args()
 
 
 if __name__ == "__main__":
-    seed()
+    args = _parse_args()
+    seed(loads_only=args.loads_only)
