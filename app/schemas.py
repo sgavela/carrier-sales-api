@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 from typing import Any, Dict, List, Literal, Optional
 
@@ -163,14 +164,84 @@ class LogCallResponseLegacy(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ── Coercion helpers ──────────────────────────────────────────────────────────
+
+def _coerce_str_or_none(v: Any) -> Optional[str]:
+    if v is None or v == "":
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+def _coerce_float_or_none(v: Any) -> Optional[float]:
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int_or_none(v: Any) -> Optional[int]:
+    f = _coerce_float_or_none(v)
+    return int(round(f)) if f is not None else None
+
+
+def _coerce_bool(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "1", "yes", "y")
+    if isinstance(v, (int, float)):
+        return bool(v)
+    return False
+
+
+def _coerce_list_of_str(v: Any) -> List[str]:
+    """Accept array, single string, comma-separated string, or empty."""
+    if v is None or v == "":
+        return []
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if x]
+    if isinstance(v, str):
+        if "," in v:
+            return [t.strip() for t in v.split(",") if t.strip()]
+        return [v.strip()]
+    return [str(v)]
+
+
+def _normalize_digits(v: Any) -> Optional[str]:
+    """Strip any non-digit characters (handles 'MC-123456', 'DOT-3456789', etc.)."""
+    s = _coerce_str_or_none(v)
+    if s is None:
+        return None
+    digits = "".join(ch for ch in s if ch.isdigit())
+    return digits or None
+
+
 # ── Call logging — HappyRobot nested schema (used by POST /log-call) ─────────
 
 class CarrierBlock(BaseModel):
     mc_number: Optional[str] = None
     carrier_name: Optional[str] = None
     dot_number: Optional[str] = None
-    eligible: bool
+    eligible: bool = False
     ineligible_reason: Optional[str] = None
+
+    @field_validator("mc_number", "dot_number", mode="before")
+    @classmethod
+    def _normalize_ids(cls, v: Any) -> Optional[str]:
+        return _normalize_digits(v)
+
+    @field_validator("carrier_name", "ineligible_reason", mode="before")
+    @classmethod
+    def _strs(cls, v: Any) -> Optional[str]:
+        return _coerce_str_or_none(v)
+
+    @field_validator("eligible", mode="before")
+    @classmethod
+    def _eligible(cls, v: Any) -> bool:
+        return _coerce_bool(v)
 
 
 class LoadBlock(BaseModel):
@@ -183,65 +254,132 @@ class LoadBlock(BaseModel):
     commodity_type: Optional[str] = None
     pickup_datetime: Optional[datetime] = None
 
+    @field_validator("load_id", "origin", "destination", "equipment_type", "commodity_type", mode="before")
+    @classmethod
+    def _strs(cls, v: Any) -> Optional[str]:
+        return _coerce_str_or_none(v)
+
+    @field_validator("loadboard_rate", mode="before")
+    @classmethod
+    def _rate(cls, v: Any) -> Optional[float]:
+        return _coerce_float_or_none(v)
+
+    @field_validator("miles", mode="before")
+    @classmethod
+    def _miles(cls, v: Any) -> Optional[int]:
+        return _coerce_int_or_none(v)
+
+    @field_validator("pickup_datetime", mode="before")
+    @classmethod
+    def _pickup(cls, v: Any) -> Optional[datetime]:
+        s = _coerce_str_or_none(v)
+        if s is None:
+            return None
+        try:
+            return datetime.fromisoformat(s)
+        except (ValueError, TypeError):
+            return None
+
 
 class NegotiationRound(BaseModel):
-    round: int = Field(ge=1, le=10)
+    round: int = Field(ge=1, le=3)
     carrier_offer: Optional[float] = None
     our_counter: Optional[float] = None
     decision: Literal["accept", "counter", "reject"]
+
+    @field_validator("carrier_offer", "our_counter", mode="before")
+    @classmethod
+    def _nums(cls, v: Any) -> Optional[float]:
+        return _coerce_float_or_none(v)
 
 
 class NegotiationBlock(BaseModel):
     initial_carrier_offer: Optional[float] = None
     final_rate: Optional[float] = None
-    num_rounds: int = Field(ge=0, default=0)
+    num_rounds: int = 0
     rounds_detail: List[NegotiationRound] = []
     walk_away_reason: Optional[str] = None
+
+    @field_validator("initial_carrier_offer", "final_rate", mode="before")
+    @classmethod
+    def _nums(cls, v: Any) -> Optional[float]:
+        return _coerce_float_or_none(v)
+
+    @field_validator("num_rounds", mode="before")
+    @classmethod
+    def _rounds(cls, v: Any) -> int:
+        return _coerce_int_or_none(v) or 0
+
+    @field_validator("walk_away_reason", mode="before")
+    @classmethod
+    def _reason(cls, v: Any) -> Optional[str]:
+        return _coerce_str_or_none(v)
+
+    @field_validator("rounds_detail", mode="before")
+    @classmethod
+    def _rounds_list(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            if v.strip() in ("", "[]"):
+                return []
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return []
+        return v or []
 
 
 class ClassificationBlock(BaseModel):
     outcome: Literal[
         "booked", "no_agreement", "carrier_not_eligible",
         "no_loads_found", "carrier_declined", "other"
-    ]
-    sentiment: Literal["positive", "neutral", "negative"]
+    ] = "other"
+    sentiment: Literal["positive", "neutral", "negative"] = "neutral"
     unresolved_topics: List[str] = []
-    tool_errors: List[str] = []
+
+    @field_validator("unresolved_topics", mode="before")
+    @classmethod
+    def _topics(cls, v: Any) -> List[str]:
+        return _coerce_list_of_str(v)
 
 
 class SummaryBlock(BaseModel):
     transcript_summary: Optional[str] = None
-    raw_extraction: Dict[str, Any] = {}
+
+    @field_validator("transcript_summary", mode="before")
+    @classmethod
+    def _str(cls, v: Any) -> Optional[str]:
+        return _coerce_str_or_none(v)
 
 
 class LogCallRequest(BaseModel):
     call_id: str
-    started_at: datetime
-    ended_at: datetime
+    duration: int = 0
+    num_user_turns: int = 0
+    num_assistant_turns: int = 0
     carrier: CarrierBlock
-    load: LoadBlock
-    negotiation: NegotiationBlock
-    classification: ClassificationBlock
-    summary: SummaryBlock
+    load: LoadBlock = Field(default_factory=LoadBlock)
+    negotiation: NegotiationBlock = Field(default_factory=NegotiationBlock)
+    classification: ClassificationBlock = Field(default_factory=ClassificationBlock)
+    summary: SummaryBlock = Field(default_factory=SummaryBlock)
 
-    @field_validator("ended_at")
+    @field_validator("duration", "num_user_turns", "num_assistant_turns", mode="before")
     @classmethod
-    def ended_after_started(cls, v: datetime, info: Any) -> datetime:
-        if "started_at" in info.data and v < info.data["started_at"]:
-            raise ValueError("ended_at must be after started_at")
-        return v
+    def _ints(cls, v: Any) -> int:
+        return _coerce_int_or_none(v) or 0
 
     model_config = {
         "json_schema_extra": {
             "example": {
-                "call_id": "hr_a1b2c3d4",
-                "started_at": "2026-04-19T15:00:00",
-                "ended_at": "2026-04-19T15:04:05",
+                "call_id": "8e8a80b0-72fe-4c2b-78ab-fe6214c2b78a",
+                "duration": 245,
+                "num_user_turns": 5,
+                "num_assistant_turns": 6,
                 "carrier": {
-                    "mc_number": "MC-123456",
+                    "mc_number": "123456",
                     "carrier_name": "SWIFT LOGISTICS LLC",
-                    "dot_number": "DOT-2001001",
+                    "dot_number": "2001001",
                     "eligible": True,
+                    "ineligible_reason": "",
                 },
                 "load": {
                     "load_id": "LD-00001",
@@ -260,17 +398,15 @@ class LogCallRequest(BaseModel):
                     "rounds_detail": [
                         {"round": 1, "carrier_offer": 1650.0, "our_counter": 1500.0, "decision": "accept"}
                     ],
-                    "walk_away_reason": None,
+                    "walk_away_reason": "",
                 },
                 "classification": {
                     "outcome": "booked",
                     "sentiment": "positive",
                     "unresolved_topics": [],
-                    "tool_errors": [],
                 },
                 "summary": {
-                    "transcript_summary": "Carrier verified. Pitched Chicago-Atlanta Dry Van at $1,500. Agreed at $1,560 after 1 round.",
-                    "raw_extraction": {},
+                    "transcript_summary": "Carrier verified. Booked Chicago-Atlanta Dry Van at $1,560.",
                 },
             }
         }
@@ -435,7 +571,7 @@ class PricingBlock(BaseModel):
 
 class RecentCall(BaseModel):
     call_id: str
-    started_at: Optional[datetime]
+    received_at: Optional[datetime]
     mc_number: str
     carrier_name: Optional[str]
     outcome: str
@@ -446,11 +582,11 @@ class RecentCall(BaseModel):
 
 
 class QualityBlock(BaseModel):
-    tool_error_rate: float
-    tool_errors_by_tool: Dict[str, int]
     unresolved_topics_breakdown: Dict[str, int]
     near_miss_count: int
     walk_away_count: int
+    avg_turn_ratio: Optional[float]
+    avg_total_turns: float
 
 
 class DashboardResponse(BaseModel):

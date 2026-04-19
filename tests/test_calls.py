@@ -205,16 +205,18 @@ def test_list_calls_pagination(client, db):
 # ── POST /calls/log-call (HappyRobot nested payload) ─────────────────────────
 
 def hr_payload(**overrides) -> dict:
-    """Build a minimal valid LogCallRequest payload."""
+    """Build a minimal valid LogCallRequest payload using the new HappyRobot schema."""
     p = {
         "call_id": "hr_test0001",
-        "started_at": "2026-04-19T15:00:00",
-        "ended_at": "2026-04-19T15:04:00",
+        "duration": 240,
+        "num_user_turns": 4,
+        "num_assistant_turns": 5,
         "carrier": {
             "mc_number": "MC-123456",
             "carrier_name": "SWIFT LOGISTICS LLC",
             "dot_number": "DOT-2001001",
             "eligible": True,
+            "ineligible_reason": "",
         },
         "load": {
             "load_id": "LD-00001",
@@ -233,17 +235,15 @@ def hr_payload(**overrides) -> dict:
             "rounds_detail": [
                 {"round": 1, "carrier_offer": 1650.0, "our_counter": 1500.0, "decision": "accept"}
             ],
-            "walk_away_reason": None,
+            "walk_away_reason": "",
         },
         "classification": {
             "outcome": "booked",
             "sentiment": "positive",
             "unresolved_topics": [],
-            "tool_errors": [],
         },
         "summary": {
             "transcript_summary": "Booked after 1 round.",
-            "raw_extraction": {},
         },
     }
     p.update(overrides)
@@ -330,3 +330,81 @@ def test_log_call_num_rounds_mismatch(client, db):
 def test_log_call_requires_api_key(client):
     res = client.post(LOG_CALL_URL, json=hr_payload())
     assert res.status_code == 401
+
+
+# ── Coercion tests ────────────────────────────────────────────────────────────
+
+def test_log_call_coerces_string_numbers(client, db):
+    """loadboard_rate and miles as strings should be coerced to numeric types."""
+    make_load(db)
+    payload = hr_payload()
+    payload["load"]["loadboard_rate"] = "1500"
+    payload["load"]["miles"] = "716"
+    res = client.post(LOG_CALL_URL, json=payload, headers=AUTH_HEADERS)
+    assert res.status_code == 200
+    record = db.get(CallLog, "hr_test0001")
+    assert record.loadboard_rate == 1500.0
+    assert record.miles == 716
+
+
+def test_log_call_accepts_empty_strings_as_null(client, db):
+    """Empty string for final_rate on a no_agreement call should be stored as None."""
+    payload = hr_payload()
+    payload["call_id"] = "hr_empty_test"
+    payload["classification"]["outcome"] = "no_agreement"
+    payload["negotiation"]["final_rate"] = ""
+    payload["negotiation"]["num_rounds"] = 0
+    payload["negotiation"]["rounds_detail"] = []
+    payload["load"]["load_id"] = ""
+    res = client.post(LOG_CALL_URL, json=payload, headers=AUTH_HEADERS)
+    assert res.status_code == 200
+    record = db.get(CallLog, "hr_empty_test")
+    assert record.final_rate is None
+    assert record.load_id is None
+
+
+def test_log_call_unresolved_topics_single_string(client, db):
+    """unresolved_topics arriving as a plain string should become a one-element list."""
+    payload = hr_payload()
+    payload["call_id"] = "hr_topics_test"
+    payload["classification"]["outcome"] = "no_agreement"
+    payload["classification"]["unresolved_topics"] = "price"
+    payload["negotiation"]["final_rate"] = None
+    payload["negotiation"]["num_rounds"] = 0
+    payload["negotiation"]["rounds_detail"] = []
+    payload["load"]["load_id"] = ""
+    res = client.post(LOG_CALL_URL, json=payload, headers=AUTH_HEADERS)
+    assert res.status_code == 200
+    record = db.get(CallLog, "hr_topics_test")
+    assert record.unresolved_topics == ["price"]
+
+
+def test_log_call_eligible_as_string(client, db):
+    """eligible='false' (string) should be coerced to False."""
+    payload = hr_payload()
+    payload["call_id"] = "hr_eligible_test"
+    payload["carrier"]["eligible"] = "false"
+    payload["classification"]["outcome"] = "carrier_not_eligible"
+    payload["negotiation"]["final_rate"] = None
+    payload["negotiation"]["num_rounds"] = 0
+    payload["negotiation"]["rounds_detail"] = []
+    payload["load"]["load_id"] = ""
+    res = client.post(LOG_CALL_URL, json=payload, headers=AUTH_HEADERS)
+    assert res.status_code == 200
+    record = db.get(CallLog, "hr_eligible_test")
+    assert record.carrier_eligible is False
+
+
+def test_log_call_rounds_detail_as_json_string(client, db):
+    """rounds_detail='[]' (JSON string) should be parsed as empty list."""
+    payload = hr_payload()
+    payload["call_id"] = "hr_rounds_test"
+    payload["classification"]["outcome"] = "no_agreement"
+    payload["negotiation"]["final_rate"] = None
+    payload["negotiation"]["num_rounds"] = 0
+    payload["negotiation"]["rounds_detail"] = "[]"
+    payload["load"]["load_id"] = ""
+    res = client.post(LOG_CALL_URL, json=payload, headers=AUTH_HEADERS)
+    assert res.status_code == 200
+    record = db.get(CallLog, "hr_rounds_test")
+    assert record.rounds_detail == []

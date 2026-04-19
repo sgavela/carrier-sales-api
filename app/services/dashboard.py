@@ -73,25 +73,23 @@ def compute_overview(
     )
 
     durations = [
-        (c["ended_at"] - c["started_at"]).total_seconds()
+        c["duration_seconds"]
         for c in calls
-        if c.get("started_at") and c.get("ended_at")
-        and (c["ended_at"] - c["started_at"]).total_seconds() > 0
+        if c.get("duration_seconds") and c["duration_seconds"] > 0
     ]
     avg_duration = round(sum(durations) / len(durations), 1) if durations else 0.0
 
     book_durations = [
-        (c["ended_at"] - c["started_at"]).total_seconds()
+        c["duration_seconds"]
         for c in booked
-        if c.get("started_at") and c.get("ended_at")
-        and (c["ended_at"] - c["started_at"]).total_seconds() > 0
+        if c.get("duration_seconds") and c["duration_seconds"] > 0
     ]
     avg_time_to_book = round(sum(book_durations) / len(book_durations), 1) if book_durations else None
 
     # calls_by_day: all days in range, fill zeros
     by_day: Counter = Counter()
     for c in calls:
-        ts = c.get("started_at")
+        ts = c.get("received_at")
         if ts:
             by_day[ts.strftime("%Y-%m-%d")] += 1
 
@@ -159,7 +157,7 @@ def compute_carriers(calls: list[dict], now: Optional[datetime] = None) -> dict:
             tier = "C"  # fallback
 
         last_call = max(
-            (c["started_at"] for c in mc_calls if c.get("started_at")),
+            (c["received_at"] for c in mc_calls if c.get("received_at")),
             default=None,
         )
 
@@ -305,15 +303,6 @@ def compute_pricing(calls: list[dict]) -> dict:
 
 def compute_quality(calls: list[dict]) -> dict:
     total = len(calls)
-    errors_by_tool: Counter = Counter()
-    error_calls = 0
-
-    for c in calls:
-        errors = c.get("tool_errors") or []
-        if errors:
-            error_calls += 1
-            for tool in errors:
-                errors_by_tool[tool] += 1
 
     topic_counts: Counter = Counter()
     for c in calls:
@@ -323,12 +312,27 @@ def compute_quality(calls: list[dict]) -> dict:
     near_misses = _find_near_misses(calls)
     walk_away_count = sum(1 for c in calls if c.get("walk_away_reason"))
 
+    # Conversational turn KPIs
+    ratios = [
+        c["num_assistant_turns"] / c["num_user_turns"]
+        for c in calls
+        if c.get("num_user_turns") and c["num_user_turns"] > 0
+        and c.get("num_assistant_turns") is not None
+    ]
+    avg_turn_ratio = round(sum(ratios) / len(ratios), 3) if ratios else None
+
+    total_turns_list = [
+        (c.get("num_user_turns") or 0) + (c.get("num_assistant_turns") or 0)
+        for c in calls
+    ]
+    avg_total_turns = round(sum(total_turns_list) / total, 1) if total else 0.0
+
     return {
-        "tool_error_rate": round(error_calls / total, 4) if total else 0.0,
-        "tool_errors_by_tool": dict(errors_by_tool),
         "unresolved_topics_breakdown": dict(topic_counts),
         "near_miss_count": len(near_misses),
         "walk_away_count": walk_away_count,
+        "avg_turn_ratio": avg_turn_ratio,
+        "avg_total_turns": avg_total_turns,
     }
 
 
@@ -337,31 +341,24 @@ def compute_quality(calls: list[dict]) -> dict:
 def get_recent_calls(calls: list[dict], limit: int = 20) -> list[dict]:
     sorted_calls = sorted(
         calls,
-        key=lambda c: c.get("started_at") or datetime.min,
+        key=lambda c: c.get("received_at") or datetime.min,
         reverse=True,
     )[:limit]
 
     result = []
     for c in sorted_calls:
-        started = c.get("started_at")
-        ended = c.get("ended_at")
-        duration = (
-            int((ended - started).total_seconds())
-            if started and ended and ended > started
-            else None
-        )
         lane = None
         if c.get("origin") and c.get("destination"):
             lane = f"{c['origin']} → {c['destination']}"
         result.append({
             "call_id": c.get("id", ""),
-            "started_at": started,
+            "received_at": c.get("received_at"),
             "mc_number": c.get("mc_number", ""),
             "carrier_name": c.get("carrier_name"),
             "outcome": c.get("outcome", "other"),
             "sentiment": c.get("sentiment", "neutral"),
             "lane": lane,
             "final_rate": c.get("final_rate"),
-            "duration_seconds": duration,
+            "duration_seconds": c.get("duration_seconds"),
         })
     return result

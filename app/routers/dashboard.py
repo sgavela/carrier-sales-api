@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import verify_api_key
@@ -55,15 +55,16 @@ def get_dashboard(
     from_dt = datetime(date_from.year, date_from.month, date_from.day)
     to_dt = datetime(date_to.year, date_to.month, date_to.day, 23, 59, 59)
 
-    # Use COALESCE so old rows with only created_at are still included
-    ts_col = func.coalesce(CallLog.started_at, CallLog.created_at)
-    stmt = select(CallLog).where(ts_col >= from_dt, ts_col <= to_dt)
+    stmt = select(CallLog).where(
+        CallLog.received_at >= from_dt,
+        CallLog.received_at <= to_dt,
+    )
 
     if equipment_type:
         stmt = stmt.where(CallLog.equipment_type == equipment_type)
 
     rows = db.scalars(stmt).all()
-    calls = _to_dicts(rows, now)
+    calls = _to_dicts(rows)
 
     logger.info(
         "dashboard computed period=%s to %s equipment=%s calls=%d",
@@ -83,13 +84,8 @@ def get_dashboard(
     )
 
 
-def _to_dicts(rows: list[CallLog], now: datetime) -> list[dict]:
-    """Convert ORM rows to plain dicts; normalise started_at using created_at as fallback."""
-    result = []
-    for r in rows:
-        d = {col.name: getattr(r, col.name) for col in CallLog.__table__.columns}
-        # Ensure started_at is never None for duration calculations
-        if d["started_at"] is None:
-            d["started_at"] = d.get("created_at")
-        result.append(d)
-    return result
+def _to_dicts(rows: list[CallLog]) -> list[dict]:
+    return [
+        {col.name: getattr(r, col.name) for col in CallLog.__table__.columns}
+        for r in rows
+    ]

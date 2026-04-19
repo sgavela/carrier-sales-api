@@ -11,6 +11,7 @@ from app.services.dashboard import (
     compute_carriers,
     compute_overview,
     compute_pricing,
+    compute_quality,
 )
 from tests.conftest import AUTH_HEADERS
 
@@ -24,8 +25,8 @@ def _call(
     id: str = "c1",
     outcome: str = "booked",
     sentiment: str = "positive",
-    started_at: Optional[datetime] = None,
-    ended_at: Optional[datetime] = None,
+    received_at: Optional[datetime] = None,
+    duration_seconds: int = 180,
     final_rate: Optional[float] = None,
     loadboard_rate: Optional[float] = None,
     initial_carrier_offer: Optional[float] = None,
@@ -39,15 +40,16 @@ def _call(
     num_rounds: int = 0,
     carrier_eligible: Optional[bool] = True,
     unresolved_topics: Optional[list] = None,
-    tool_errors: Optional[list] = None,
+    num_user_turns: int = 4,
+    num_assistant_turns: int = 5,
 ) -> dict:
     now = datetime(2026, 4, 19, 15, 0, 0)
     return {
         "id": id,
         "outcome": outcome,
         "sentiment": sentiment,
-        "started_at": started_at or now,
-        "ended_at": ended_at or (started_at or now) + timedelta(seconds=180),
+        "received_at": received_at or now,
+        "duration_seconds": duration_seconds,
         "final_rate": final_rate,
         "loadboard_rate": loadboard_rate,
         "initial_carrier_offer": initial_carrier_offer,
@@ -61,8 +63,9 @@ def _call(
         "num_rounds": num_rounds,
         "carrier_eligible": carrier_eligible,
         "unresolved_topics": unresolved_topics or [],
-        "tool_errors": tool_errors or [],
-        "created_at": started_at or now,
+        "num_user_turns": num_user_turns,
+        "num_assistant_turns": num_assistant_turns,
+        "created_at": received_at or now,
         "dot_number": None,
         "ineligible_reason": None,
         "miles": None,
@@ -122,6 +125,18 @@ def test_dashboard_margin_only_booked():
     assert result["avg_margin_pct"] == pytest.approx(0.1, abs=0.001)
 
 
+# ── test_dashboard_duration_from_field ───────────────────────────────────────
+
+def test_dashboard_duration_from_field():
+    """avg_call_duration_seconds reads duration_seconds directly."""
+    calls = [
+        _call(id="c1", duration_seconds=200),
+        _call(id="c2", duration_seconds=400),
+    ]
+    result = compute_overview(calls, DATE_FROM, DATE_TO)
+    assert result["avg_call_duration_seconds"] == pytest.approx(300.0, abs=0.1)
+
+
 # ── test_dashboard_near_miss_detection ───────────────────────────────────────
 
 def test_dashboard_near_miss_detection():
@@ -167,16 +182,14 @@ def test_dashboard_dormant_carriers():
 
     calls = [
         _call(id="d1", mc_number="MC-DORMANT", outcome="booked",
-              started_at=old_date, ended_at=old_date + timedelta(seconds=200),
+              received_at=old_date, duration_seconds=200,
               final_rate=1500.0, loadboard_rate=1500.0),
         _call(id="d2", mc_number="MC-DORMANT", outcome="booked",
-              started_at=old_date + timedelta(hours=1),
-              ended_at=old_date + timedelta(hours=1, seconds=200),
+              received_at=old_date + timedelta(hours=1), duration_seconds=200,
               final_rate=1500.0, loadboard_rate=1500.0),
         # Active carrier (recent call) — must NOT appear in dormant
         _call(id="a1", mc_number="MC-ACTIVE", outcome="booked",
-              started_at=test_now - timedelta(days=2),
-              ended_at=test_now - timedelta(days=2) + timedelta(seconds=200),
+              received_at=test_now - timedelta(days=2), duration_seconds=200,
               final_rate=1500.0, loadboard_rate=1500.0),
     ]
 
@@ -238,8 +251,8 @@ def test_dashboard_equipment_filter(client, db):
         carrier_name="REEFER CO",
         outcome=CallOutcome.booked,
         sentiment=CallSentiment.positive,
-        started_at=now,
-        ended_at=now + timedelta(seconds=200),
+        received_at=now,
+        duration_seconds=200,
         created_at=now,
         load_id="LD-REEF",
         equipment_type="Reefer",
@@ -253,8 +266,8 @@ def test_dashboard_equipment_filter(client, db):
         carrier_name="DRY CO",
         outcome=CallOutcome.no_agreement,
         sentiment=CallSentiment.negative,
-        started_at=now - timedelta(hours=1),
-        ended_at=now - timedelta(hours=1) + timedelta(seconds=400),
+        received_at=now - timedelta(hours=1),
+        duration_seconds=400,
         created_at=now - timedelta(hours=1),
         load_id="LD-DRY",
         equipment_type="Dry Van",
@@ -274,3 +287,30 @@ def test_dashboard_equipment_filter(client, db):
     assert data["equipment_filter"] == "Reefer"
     # The Dry Van no_agreement call must not be counted
     assert data["overview"]["outcome_breakdown"].get("no_agreement", 0) == 0
+
+
+# ── test_dashboard_turn_kpis ──────────────────────────────────────────────────
+
+def test_dashboard_turn_kpis():
+    """avg_turn_ratio and avg_total_turns should be computed correctly."""
+    calls = [
+        _call(id="t1", num_user_turns=4, num_assistant_turns=6),   # ratio = 1.5
+        _call(id="t2", num_user_turns=2, num_assistant_turns=2),   # ratio = 1.0
+    ]
+    result = compute_quality(calls)
+    # avg ratio = (1.5 + 1.0) / 2 = 1.25
+    assert result["avg_turn_ratio"] == pytest.approx(1.25, abs=0.01)
+    # avg total turns = (10 + 4) / 2 = 7
+    assert result["avg_total_turns"] == pytest.approx(7.0, abs=0.1)
+
+
+def test_dashboard_turn_ratio_skips_zero_user_turns():
+    """Calls with num_user_turns=0 must not contribute to avg_turn_ratio."""
+    calls = [
+        _call(id="t1", num_user_turns=0, num_assistant_turns=3),  # excluded
+        _call(id="t2", num_user_turns=4, num_assistant_turns=4),  # ratio = 1.0
+    ]
+    result = compute_quality(calls)
+    assert result["avg_turn_ratio"] == pytest.approx(1.0, abs=0.01)
+    # avg_total_turns still counts all calls: (0+3 + 4+4) / 2 = 5.5
+    assert result["avg_total_turns"] == pytest.approx(5.5, abs=0.1)

@@ -136,8 +136,6 @@ TOPIC_WEIGHTS = [
     ("route", 0.07), ("payment_terms", 0.05), ("hazmat", 0.03),
 ]
 
-TOOL_ERROR_TOOLS = ["verify_carrier", "search_loads", "evaluate_offer"]
-
 INELIGIBLE_REASONS = [
     "FMCSA authority inactive",
     "Safety rating: Unsatisfactory",
@@ -284,14 +282,13 @@ def _make_call(
     rng: random.Random,
     carrier_idx: int,
     outcome: str,
-    started_at: datetime,
+    received_at: datetime,
     load: Optional[Load],
     near_miss: bool = False,
 ) -> CallLog:
     carrier = CARRIERS[carrier_idx]
     mu, sigma = DURATION_PARAMS[outcome]
     duration = max(30, int(rng.gauss(mu, sigma)))
-    ended_at = started_at + timedelta(seconds=duration)
 
     carrier_eligible = outcome != "carrier_not_eligible"
     ineligible_reason: Optional[str] = (
@@ -353,11 +350,6 @@ def _make_call(
     elif outcome == "carrier_declined" and rng.random() < 0.40:
         topics = _pick_topics(rng)
 
-    # Tool errors (1.5% global rate)
-    tool_errors: list[str] = []
-    if rng.random() < 0.015:
-        tool_errors = [rng.choice(TOOL_ERROR_TOOLS)]
-
     lane_str = f"{origin} → {destination}" if origin and destination else None
 
     summary = make_summary(
@@ -376,37 +368,24 @@ def _make_call(
         ineligible_reason=ineligible_reason,
     )
 
-    raw_extraction = {
-        "extract_parameters": {
-            "mc_number": carrier["mc"],
-            "carrier_name": carrier["name"],
-            "dot_number": carrier["dot"],
-            "carrier_eligible": carrier_eligible,
-            "load_id": load_id,
-            "origin": origin,
-            "destination": destination,
-            "equipment_type": eq_type,
-            "loadboard_rate": lb_rate,
-            "final_rate": final_rate,
-            "num_rounds": num_rounds,
-        },
-        "classify_outcome": {
-            "category": outcome,
-            "confidence": round(rng.uniform(0.85, 0.98), 2),
-        },
-        "classify_sentiment": {
-            "category": sentiment,
-            "confidence": round(rng.uniform(0.70, 0.95), 2),
-        },
-    }
+    # Turn counts based on outcome and duration
+    if outcome == "carrier_not_eligible":
+        num_user_turns = max(1, int(rng.gauss(3, 0.5)))
+    elif outcome == "no_agreement":
+        num_user_turns = max(3, int(rng.gauss(11, 2)))
+    else:
+        num_user_turns = max(1, int(duration / 20 * rng.gauss(1.0, 0.2)))
+    num_assistant_turns = max(1, int(num_user_turns * rng.gauss(1.15, 0.15)))
 
     call_id = "hr_" + str(uuid.uuid4())[:8]
 
     return CallLog(
         id=call_id,
-        created_at=started_at,
-        started_at=started_at,
-        ended_at=ended_at,
+        created_at=received_at,
+        received_at=received_at,
+        duration_seconds=duration,
+        num_user_turns=num_user_turns,
+        num_assistant_turns=num_assistant_turns,
         mc_number=carrier["mc"],
         carrier_name=carrier["name"],
         dot_number=carrier["dot"],
@@ -428,9 +407,7 @@ def _make_call(
         outcome=CallOutcome(outcome),
         sentiment=CallSentiment(sentiment),
         unresolved_topics=topics or None,
-        tool_errors=tool_errors or None,
         transcript_summary=summary,
-        raw_extraction=raw_extraction,
         # legacy fields
         initial_rate=initial_offer,
         num_negotiation_rounds=num_rounds,
@@ -450,7 +427,7 @@ def _ensure_schema() -> None:
         init_db()
         return
 
-    required_new = {"started_at", "ended_at", "dot_number", "rounds_detail", "num_rounds"}
+    required_new = {"received_at", "duration_seconds", "num_user_turns", "num_assistant_turns"}
     if not required_new.issubset(existing):
         with engine.begin() as conn:
             conn.execute(text("DROP TABLE IF EXISTS call_logs"))
@@ -495,13 +472,13 @@ def seed_call_logs(count: int = TOTAL_COUNT, force: bool = False) -> None:
             rng.shuffle(dormant_outcomes)
             for outcome in dormant_outcomes:
                 day = _pick_weekday(rng, 0, DORMANT_MAX_DAY - 1)
-                started = _call_start(rng, day)
+                received_at = _call_start(rng, day)
                 load: Optional[Load] = None
                 if outcome in ("booked", "no_agreement", "carrier_declined"):
                     load = _pick_load(rng, load_pool)
                 elif outcome == "other" and rng.random() < 0.50:
                     load = _pick_load(rng, load_pool)
-                call = _make_call(rng, cidx, outcome, started, load)
+                call = _make_call(rng, cidx, outcome, received_at, load)
                 all_calls.append(call)
 
         # ── 2. Non-dormant calls (135 total) ─────────────────────────────────
@@ -523,7 +500,7 @@ def seed_call_logs(count: int = TOTAL_COUNT, force: bool = False) -> None:
 
         for slot_i, (outcome, cidx) in enumerate(zip(outcome_list, carrier_slots)):
             day = _pick_weekday(rng, 0, WINDOW_DAYS - 1)
-            started = _call_start(rng, day)
+            received_at = _call_start(rng, day)
 
             load = None
             if outcome in ("booked", "no_agreement", "carrier_declined"):
@@ -532,7 +509,7 @@ def seed_call_logs(count: int = TOTAL_COUNT, force: bool = False) -> None:
                 load = _pick_load(rng, load_pool)
 
             near_miss = slot_i in near_miss_slots
-            call = _make_call(rng, cidx, outcome, started, load, near_miss=near_miss)
+            call = _make_call(rng, cidx, outcome, received_at, load, near_miss=near_miss)
             all_calls.append(call)
 
         # ── 3. Scale to requested count if different from default ─────────────
@@ -564,14 +541,14 @@ def _scale_calls(
         outcome = _wc(rng, list(zip(outcomes, weights_full)))
         cidx = carrier_idxs[i % 40]
         day = _pick_weekday(rng, 0, WINDOW_DAYS - 1)
-        started = _call_start(rng, day)
+        received_at = _call_start(rng, day)
 
         load = None
         if outcome in ("booked", "no_agreement", "carrier_declined"):
             load = _pick_load(rng, load_pool)
 
         near_miss = outcome == "no_agreement" and rng.random() < (NEAR_MISS_COUNT / 45)
-        call = _make_call(rng, cidx, outcome, started, load, near_miss=near_miss)
+        call = _make_call(rng, cidx, outcome, received_at, load, near_miss=near_miss)
         call_list.append(call)
 
     return call_list
@@ -607,7 +584,7 @@ def _print_summary(calls: list[CallLog]) -> None:
 
     dormant = 0
     for mc, mc_calls in by_mc.items():
-        last_call_dt = max(c.started_at for c in mc_calls if c.started_at)
+        last_call_dt = max(c.received_at for c in mc_calls if c.received_at)
         bookings = sum(1 for c in mc_calls if c.outcome.value == "booked")
         if last_call_dt < cutoff and bookings >= 2:
             dormant += 1

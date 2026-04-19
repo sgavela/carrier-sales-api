@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # Server
     PORT: int = 8000
     LOG_LEVEL: str = "INFO"
+    DEBUG: bool = False
 
     # CORS — stored as a comma-separated string, exposed as a list
     CORS_ORIGINS: str = "http://localhost:3000"

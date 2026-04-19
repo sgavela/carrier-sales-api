@@ -68,10 +68,12 @@ class CallLog(Base):
     id: Mapped[str] = mapped_column(
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
-    # Timestamps
+    # Timestamps — received_at is set server-side when the payload arrives
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    duration_seconds: Mapped[int] = mapped_column(Integer, default=0)
+    num_user_turns: Mapped[int] = mapped_column(Integer, default=0)
+    num_assistant_turns: Mapped[int] = mapped_column(Integer, default=0)
     # Carrier identity
     mc_number: Mapped[str] = mapped_column(String(20))
     carrier_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
@@ -99,7 +101,6 @@ class CallLog(Base):
     outcome: Mapped[CallOutcome] = mapped_column(Enum(CallOutcome))
     sentiment: Mapped[CallSentiment] = mapped_column(Enum(CallSentiment))
     unresolved_topics: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
-    tool_errors: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
     # Summaries
     transcript_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     raw_extraction: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Optional
 
 from fastapi import HTTPException, status
@@ -11,7 +12,7 @@ from app.schemas import LogCallRequest
 
 
 def normalize_mc(raw: Optional[str]) -> Optional[str]:
-    """Strip 'MC' prefix, spaces, dashes. Return None if nothing remains."""
+    """Strip 'MC' prefix, spaces, dashes. Used by the legacy /calls/log endpoint."""
     if raw is None:
         return None
     s = raw.strip().upper()
@@ -52,11 +53,14 @@ def validate_business_rules(body: LogCallRequest) -> None:
 
 def flatten_payload(p: LogCallRequest) -> dict:
     """Map the nested HappyRobot payload to a flat dict matching CallLog columns."""
+    now = datetime.utcnow()
     return {
         "id": p.call_id,
-        "started_at": p.started_at,
-        "ended_at": p.ended_at,
-        "mc_number": normalize_mc(p.carrier.mc_number) or "",
+        "received_at": now,
+        "duration_seconds": p.duration,
+        "num_user_turns": p.num_user_turns,
+        "num_assistant_turns": p.num_assistant_turns,
+        "mc_number": p.carrier.mc_number or "",
         "carrier_name": p.carrier.carrier_name,
         "dot_number": p.carrier.dot_number,
         "carrier_eligible": p.carrier.eligible,
@@ -77,9 +81,7 @@ def flatten_payload(p: LogCallRequest) -> dict:
         "outcome": p.classification.outcome,
         "sentiment": p.classification.sentiment,
         "unresolved_topics": p.classification.unresolved_topics,
-        "tool_errors": p.classification.tool_errors,
         "transcript_summary": p.summary.transcript_summary,
-        "raw_extraction": p.summary.raw_extraction,
         # legacy compat columns
         "initial_rate": p.negotiation.initial_carrier_offer,
         "num_negotiation_rounds": p.negotiation.num_rounds,

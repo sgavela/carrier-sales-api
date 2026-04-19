@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import Any
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
 
 from app.auth import verify_api_key
+from app.config import settings
 from app.db import get_db
 from app.models import CallLog, CallOutcome, Load, LoadStatus
 from app.schemas import (
@@ -116,18 +118,12 @@ def log_call(body: LogCallRequest, db: Session = Depends(get_db)) -> LogCallResp
             body.call_id, flat["outcome"], flat["mc_number"],
         )
     else:
-        record = CallLog(**flat, created_at=body.started_at)
+        record = CallLog(**flat)
         db.add(record)
         action = "created"
         logger.info(
             "call_logged id=%s outcome=%s mc=%s final_rate=%s",
             body.call_id, flat["outcome"], flat["mc_number"], flat["final_rate"],
-        )
-
-    if flat["tool_errors"]:
-        logger.warning(
-            "tool_errors reported for call %s: %s",
-            body.call_id, flat["tool_errors"],
         )
 
     # 4. Side effects for booked outcome
@@ -161,6 +157,22 @@ def log_call(body: LogCallRequest, db: Session = Depends(get_db)) -> LogCallResp
         load_status_changed=load_status_changed,
         warning=warning,
     )
+
+
+# ── Debug endpoint (only when DEBUG=true) ─────────────────────────────────────
+
+_debug_router = APIRouter(prefix="/calls", tags=["calls"])
+
+
+@_debug_router.post("/log-call-debug", status_code=status.HTTP_200_OK)
+async def log_call_debug(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    logger.warning("log_call_debug payload: %s", body)
+    return {"received": True, "keys": list(body.keys()) if isinstance(body, dict) else None}
+
+
+if getattr(settings, "DEBUG", False):
+    router.include_router(_debug_router)
 
 
 # ── Shared helper ─────────────────────────────────────────────────────────────
