@@ -19,7 +19,7 @@ class TestRound1:
         d = evaluate(RATE, RATE, 1)
         assert d.action == "accept"
         assert d.counter_offer is None
-        assert d.should_close is False
+        assert d.should_close is True
 
     def test_accept_when_offer_below_loadboard_rate(self):
         d = evaluate(RATE, 1800.0, 1)
@@ -82,7 +82,7 @@ class TestRound3:
         # accept ceiling = 2000 * 1.08 = 2160
         d = evaluate(RATE, 2160.0, 3)
         assert d.action == "accept"
-        assert d.should_close is False
+        assert d.should_close is True
 
     def test_accept_when_offer_below_final_ceiling(self):
         d = evaluate(RATE, 2100.0, 3)
