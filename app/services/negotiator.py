@@ -47,7 +47,7 @@ def _round_1(rate: float, offer: float) -> NegotiationDecision:
             action="accept",
             counter_offer=None,
             message_hint=f"That works for us. We'll confirm at ${offer:,.2f}.",
-            should_close=False,
+            should_close=True,
         )
 
     our_counter = _fmt(rate * (1 + settings.ROUND1_COUNTER_PCT))
@@ -83,7 +83,7 @@ def _round_2(rate: float, offer: float) -> NegotiationDecision:
             action="accept",
             counter_offer=None,
             message_hint=f"Deal. We'll lock it in at ${offer:,.2f}.",
-            should_close=False,
+            should_close=True,
         )
 
     # Reference point: what we countered in round 1
@@ -123,7 +123,7 @@ def _round_final(rate: float, offer: float) -> NegotiationDecision:
             action="accept",
             counter_offer=None,
             message_hint=f"Alright, we'll accept ${offer:,.2f}. Let's get this booked.",
-            should_close=False,
+            should_close=True,
         )
 
     return NegotiationDecision(
