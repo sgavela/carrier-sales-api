@@ -489,10 +489,12 @@ class MetricsResponse(BaseModel):
 class DayBucket(BaseModel):
     date: str
     count: int
+    booked: int = 0
 
 
 class OverviewBlock(BaseModel):
     total_calls: int
+    booked: int
     booking_rate: float
     avg_margin_pct: Optional[float]
     revenue_captured: float
@@ -507,8 +509,10 @@ class CarrierSummary(BaseModel):
     mc_number: str
     carrier_name: Optional[str]
     total_calls: int
+    bookings: int
     booking_rate: float
     avg_rounds: float
+    avg_margin_pct: Optional[float]
     sentiment_score: float
     tier: str
     last_call_at: Optional[datetime]
@@ -519,18 +523,28 @@ class DormantCarrier(BaseModel):
     carrier_name: Optional[str]
     last_call_at: datetime
     historical_bookings: int
+    historical_revenue: float
+    avg_margin_pct: Optional[float]
     days_dormant: int
+
+
+class RepeatVsNew(BaseModel):
+    repeat_calls: int
+    new_caller_calls: int
 
 
 class CarriersBlock(BaseModel):
     carriers: List[CarrierSummary]
+    tier_distribution: Dict[str, int]
+    repeat_vs_new: RepeatVsNew
     dormant_carriers: List[DormantCarrier]
 
 
 class LanePricing(BaseModel):
     lane: str
     equipment_type: Optional[str]
-    total_calls: int
+    calls: int
+    bookings: int
     avg_final_rate: float
     avg_loadboard_rate: Optional[float]
     avg_margin_pct: Optional[float]
@@ -569,6 +583,23 @@ class PricingBlock(BaseModel):
     walk_away_rate: float
 
 
+class DurationByOutcome(BaseModel):
+    outcome: str
+    avg_seconds: float
+    median_seconds: float
+
+
+class QualityBlock(BaseModel):
+    duration_by_outcome: List[DurationByOutcome]
+    rounds_distribution: Dict[str, int]
+    unresolved_topics_breakdown: Dict[str, int]
+    sentiment_on_booked_transfer: Dict[str, int]
+    near_miss_count: int
+    walk_away_count: int
+    avg_turn_ratio: Optional[float]
+    avg_total_turns: float
+
+
 class RecentCall(BaseModel):
     call_id: str
     received_at: Optional[datetime]
@@ -577,16 +608,9 @@ class RecentCall(BaseModel):
     outcome: str
     sentiment: str
     lane: Optional[str]
+    load_id: Optional[str]
     final_rate: Optional[float]
     duration_seconds: Optional[int]
-
-
-class QualityBlock(BaseModel):
-    unresolved_topics_breakdown: Dict[str, int]
-    near_miss_count: int
-    walk_away_count: int
-    avg_turn_ratio: Optional[float]
-    avg_total_turns: float
 
 
 class DashboardResponse(BaseModel):

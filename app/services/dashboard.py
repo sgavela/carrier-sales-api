@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import statistics
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -57,19 +58,20 @@ def compute_overview(
     calls: list[dict], date_from: date, date_to: date
 ) -> dict:
     total = len(calls)
-    booked = [c for c in calls if c.get("outcome") == "booked"]
+    booked_calls = [c for c in calls if c.get("outcome") == "booked"]
+    booked_count = len(booked_calls)
 
-    booking_rate = round(len(booked) / total, 4) if total else 0.0
+    booking_rate = round(booked_count / total, 4) if total else 0.0
 
     margins = [
         (c["final_rate"] - c["loadboard_rate"]) / c["loadboard_rate"]
-        for c in booked
+        for c in booked_calls
         if c.get("final_rate") and c.get("loadboard_rate")
     ]
     avg_margin_pct = round(sum(margins) / len(margins), 4) if margins else None
 
     revenue_captured = round(
-        sum(c["final_rate"] for c in booked if c.get("final_rate")), 2
+        sum(c["final_rate"] for c in booked_calls if c.get("final_rate")), 2
     )
 
     durations = [
@@ -81,22 +83,31 @@ def compute_overview(
 
     book_durations = [
         c["duration_seconds"]
-        for c in booked
+        for c in booked_calls
         if c.get("duration_seconds") and c["duration_seconds"] > 0
     ]
     avg_time_to_book = round(sum(book_durations) / len(book_durations), 1) if book_durations else None
 
-    # calls_by_day: all days in range, fill zeros
-    by_day: Counter = Counter()
+    # calls_by_day with booked split
+    by_day_total: Counter = Counter()
+    by_day_booked: Counter = Counter()
     for c in calls:
         ts = c.get("received_at")
         if ts:
-            by_day[ts.strftime("%Y-%m-%d")] += 1
+            day_str = ts.strftime("%Y-%m-%d")
+            by_day_total[day_str] += 1
+            if c.get("outcome") == "booked":
+                by_day_booked[day_str] += 1
 
     calls_by_day = []
     d = date_from
     while d <= date_to:
-        calls_by_day.append({"date": d.strftime("%Y-%m-%d"), "count": by_day.get(d.strftime("%Y-%m-%d"), 0)})
+        day_str = d.strftime("%Y-%m-%d")
+        calls_by_day.append({
+            "date": day_str,
+            "count": by_day_total.get(day_str, 0),
+            "booked": by_day_booked.get(day_str, 0),
+        })
         d += timedelta(days=1)
 
     outcome_counts: dict[str, int] = dict(Counter(c.get("outcome", "other") for c in calls))
@@ -104,6 +115,7 @@ def compute_overview(
 
     return {
         "total_calls": total,
+        "booked": booked_count,
         "booking_rate": booking_rate,
         "avg_margin_pct": avg_margin_pct,
         "revenue_captured": revenue_captured,
@@ -130,9 +142,12 @@ def compute_carriers(calls: list[dict], now: Optional[datetime] = None) -> dict:
             by_mc[mc].append(c)
 
     carriers = []
+    tier_counts: Counter = Counter()
+
     for mc, mc_calls in by_mc.items():
         total = len(mc_calls)
-        booked_n = sum(1 for c in mc_calls if c.get("outcome") == "booked")
+        booked_calls = [c for c in mc_calls if c.get("outcome") == "booked"]
+        booked_n = len(booked_calls)
         booking_rate = round(booked_n / total, 4) if total else 0.0
 
         avg_rounds = round(
@@ -142,9 +157,15 @@ def compute_carriers(calls: list[dict], now: Optional[datetime] = None) -> dict:
         scores = [_score(c.get("sentiment")) for c in mc_calls]
         avg_sentiment = round(sum(scores) / len(scores), 3)
 
+        margins = [
+            (c["final_rate"] - c["loadboard_rate"]) / c["loadboard_rate"]
+            for c in booked_calls
+            if c.get("final_rate") and c.get("loadboard_rate")
+        ]
+        avg_margin_pct = round(sum(margins) / len(margins), 4) if margins else None
+
         has_ineligible = any(c.get("carrier_eligible") is False for c in mc_calls)
 
-        # Tier: evaluate in order A → B → C → D
         if total >= 3 and booking_rate > 0.5 and avg_sentiment > 0.3:
             tier = "A"
         elif total >= 2 and booking_rate > 0.3:
@@ -154,7 +175,9 @@ def compute_carriers(calls: list[dict], now: Optional[datetime] = None) -> dict:
         elif has_ineligible:
             tier = "D"
         else:
-            tier = "C"  # fallback
+            tier = "C"
+
+        tier_counts[tier] += 1
 
         last_call = max(
             (c["received_at"] for c in mc_calls if c.get("received_at")),
@@ -165,32 +188,52 @@ def compute_carriers(calls: list[dict], now: Optional[datetime] = None) -> dict:
             "mc_number": mc,
             "carrier_name": mc_calls[0].get("carrier_name"),
             "total_calls": total,
+            "bookings": booked_n,
             "booking_rate": booking_rate,
             "avg_rounds": avg_rounds,
+            "avg_margin_pct": avg_margin_pct,
             "sentiment_score": avg_sentiment,
             "tier": tier,
             "last_call_at": last_call,
         })
 
-    # Dormant: last call > 25 days ago AND ≥2 bookings within the provided call set
+    # repeat vs new: carriers with >1 call are "repeat"
+    repeat_mcs = {mc for mc, mc_calls in by_mc.items() if len(mc_calls) > 1}
+    repeat_calls = sum(len(by_mc[mc]) for mc in repeat_mcs)
+    new_caller_calls = sum(len(mc_calls) for mc, mc_calls in by_mc.items() if mc not in repeat_mcs)
+
+    # dormant: last call > 25 days ago AND ≥2 bookings
     dormant = []
     for c in carriers:
         last = c["last_call_at"]
         if last and last < dormant_cutoff:
-            historical_bookings = sum(
-                1 for call in by_mc[c["mc_number"]] if call.get("outcome") == "booked"
-            )
+            mc_calls = by_mc[c["mc_number"]]
+            booked_calls = [call for call in mc_calls if call.get("outcome") == "booked"]
+            historical_bookings = len(booked_calls)
             if historical_bookings >= 2:
+                historical_revenue = round(
+                    sum(call["final_rate"] for call in booked_calls if call.get("final_rate")), 2
+                )
+                margins = [
+                    (call["final_rate"] - call["loadboard_rate"]) / call["loadboard_rate"]
+                    for call in booked_calls
+                    if call.get("final_rate") and call.get("loadboard_rate")
+                ]
+                avg_margin_pct = round(sum(margins) / len(margins), 4) if margins else None
                 dormant.append({
                     "mc_number": c["mc_number"],
                     "carrier_name": c["carrier_name"],
                     "last_call_at": last,
                     "historical_bookings": historical_bookings,
+                    "historical_revenue": historical_revenue,
+                    "avg_margin_pct": avg_margin_pct,
                     "days_dormant": (now - last).days,
                 })
 
     return {
         "carriers": sorted(carriers, key=lambda x: -x["total_calls"]),
+        "tier_distribution": dict(tier_counts),
+        "repeat_vs_new": {"repeat_calls": repeat_calls, "new_caller_calls": new_caller_calls},
         "dormant_carriers": dormant,
     }
 
@@ -214,31 +257,36 @@ def compute_pricing(calls: list[dict]) -> dict:
         eq: round(sum(ms) / len(ms), 4) for eq, ms in by_eq.items()
     }
 
-    # Pricing by lane (booked calls with origin + destination)
-    by_lane: dict[str, list[dict]] = defaultdict(list)
+    # Pricing by lane: count all calls and booked calls per lane
+    by_lane_all: dict[str, list[dict]] = defaultdict(list)
+    by_lane_booked: dict[str, list[dict]] = defaultdict(list)
     for c in calls:
-        if c.get("outcome") == "booked" and c.get("origin") and c.get("destination"):
-            by_lane[f"{c['origin']} → {c['destination']}"].append(c)
+        if c.get("origin") and c.get("destination"):
+            lane_key = f"{c['origin']} → {c['destination']}"
+            by_lane_all[lane_key].append(c)
+            if c.get("outcome") == "booked":
+                by_lane_booked[lane_key].append(c)
 
     pricing_by_lane = []
-    for lane, lc in by_lane.items():
-        final_rates = [c["final_rate"] for c in lc if c.get("final_rate")]
-        lb_rates = [c["loadboard_rate"] for c in lc if c.get("loadboard_rate")]
+    for lane, all_lc in by_lane_all.items():
+        booked_lc = by_lane_booked.get(lane, [])
+        final_rates = [c["final_rate"] for c in booked_lc if c.get("final_rate")]
+        lb_rates = [c["loadboard_rate"] for c in booked_lc if c.get("loadboard_rate")]
         margins = [
             (c["final_rate"] - c["loadboard_rate"]) / c["loadboard_rate"]
-            for c in lc
+            for c in booked_lc
             if c.get("final_rate") and c.get("loadboard_rate")
         ]
-        if final_rates:
-            eq_types = [c["equipment_type"] for c in lc if c.get("equipment_type")]
-            pricing_by_lane.append({
-                "lane": lane,
-                "equipment_type": eq_types[0] if eq_types else None,
-                "total_calls": len(lc),
-                "avg_final_rate": round(sum(final_rates) / len(final_rates), 2),
-                "avg_loadboard_rate": round(sum(lb_rates) / len(lb_rates), 2) if lb_rates else None,
-                "avg_margin_pct": round(sum(margins) / len(margins), 4) if margins else None,
-            })
+        eq_types = [c["equipment_type"] for c in all_lc if c.get("equipment_type")]
+        pricing_by_lane.append({
+            "lane": lane,
+            "equipment_type": eq_types[0] if eq_types else None,
+            "calls": len(all_lc),
+            "bookings": len(booked_lc),
+            "avg_final_rate": round(sum(final_rates) / len(final_rates), 2) if final_rates else 0.0,
+            "avg_loadboard_rate": round(sum(lb_rates) / len(lb_rates), 2) if lb_rates else None,
+            "avg_margin_pct": round(sum(margins) / len(margins), 4) if margins else None,
+        })
 
     # Counter-offer gap distribution
     buckets: dict[str, int] = {"<0": 0, "0-5": 0, "5-10": 0, "10-15": 0, "15+": 0}
@@ -260,7 +308,7 @@ def compute_pricing(calls: list[dict]) -> dict:
 
     counter_offer_dist = [{"bucket": k, "count": v} for k, v in buckets.items()]
 
-    # Accept rate by round (requires decision field in rounds_detail)
+    # Accept rate by round
     round_stats: dict[int, dict[str, int]] = {
         1: {"offers": 0, "accepted": 0},
         2: {"offers": 0, "accepted": 0},
@@ -291,7 +339,7 @@ def compute_pricing(calls: list[dict]) -> dict:
 
     return {
         "avg_margin_pct_by_equipment": avg_margin_by_eq,
-        "pricing_by_lane": sorted(pricing_by_lane, key=lambda x: -x["total_calls"]),
+        "pricing_by_lane": sorted(pricing_by_lane, key=lambda x: -x["calls"]),
         "counter_offer_distribution": counter_offer_dist,
         "accept_rate_by_round": accept_rate_by_round,
         "lost_near_miss": near_misses,
@@ -304,10 +352,45 @@ def compute_pricing(calls: list[dict]) -> dict:
 def compute_quality(calls: list[dict]) -> dict:
     total = len(calls)
 
+    # Duration by outcome
+    by_outcome: dict[str, list[float]] = defaultdict(list)
+    for c in calls:
+        outcome = c.get("outcome")
+        dur = c.get("duration_seconds")
+        if outcome and dur and dur > 0:
+            by_outcome[outcome].append(float(dur))
+
+    duration_by_outcome = [
+        {
+            "outcome": outcome,
+            "avg_seconds": round(sum(durs) / len(durs), 1),
+            "median_seconds": round(statistics.median(durs), 1),
+        }
+        for outcome, durs in sorted(by_outcome.items())
+    ]
+
+    # Rounds distribution (num_rounds column: 0, 1, 2, 3+)
+    rounds_dist = {"0_rounds": 0, "1_round": 0, "2_rounds": 0, "3_rounds": 0}
+    for c in calls:
+        nr = c.get("num_rounds") or 0
+        if nr == 0:
+            rounds_dist["0_rounds"] += 1
+        elif nr == 1:
+            rounds_dist["1_round"] += 1
+        elif nr == 2:
+            rounds_dist["2_rounds"] += 1
+        else:
+            rounds_dist["3_rounds"] += 1
+
+    # Unresolved topics
     topic_counts: Counter = Counter()
     for c in calls:
         for t in c.get("unresolved_topics") or []:
             topic_counts[t] += 1
+
+    # Sentiment breakdown for booked calls only
+    booked_sentiments = [c.get("sentiment", "neutral") for c in calls if c.get("outcome") == "booked"]
+    sentiment_on_booked = dict(Counter(booked_sentiments))
 
     near_misses = _find_near_misses(calls)
     walk_away_count = sum(1 for c in calls if c.get("walk_away_reason"))
@@ -328,7 +411,10 @@ def compute_quality(calls: list[dict]) -> dict:
     avg_total_turns = round(sum(total_turns_list) / total, 1) if total else 0.0
 
     return {
+        "duration_by_outcome": duration_by_outcome,
+        "rounds_distribution": rounds_dist,
         "unresolved_topics_breakdown": dict(topic_counts),
+        "sentiment_on_booked_transfer": sentiment_on_booked,
         "near_miss_count": len(near_misses),
         "walk_away_count": walk_away_count,
         "avg_turn_ratio": avg_turn_ratio,
@@ -358,6 +444,7 @@ def get_recent_calls(calls: list[dict], limit: int = 20) -> list[dict]:
             "outcome": c.get("outcome", "other"),
             "sentiment": c.get("sentiment", "neutral"),
             "lane": lane,
+            "load_id": c.get("load_id"),
             "final_rate": c.get("final_rate"),
             "duration_seconds": c.get("duration_seconds"),
         })
